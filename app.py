@@ -13,7 +13,8 @@ import os
 from datetime import date, datetime
 from pathlib import Path
 
-import anthropic
+from google import genai
+from google.genai import errors, types
 import streamlit as st
 
 import db
@@ -22,7 +23,7 @@ import db
 # Configuration
 # ----------------------------------------------------------------------------
 BASE_DIR = Path(__file__).parent
-MODEL = "claude-sonnet-5-5"
+MODEL = "gemini-2.5-flash"
 MAX_TOKENS = 1024
 MAX_HISTORY_MESSAGES = 20
 MAX_USER_MESSAGES_PER_SESSION = 40  # protects the API budget
@@ -166,28 +167,40 @@ def build_system_prompt() -> str:
 
 def get_api_key() -> str | None:
     try:
-        return st.secrets["ANTHROPIC_API_KEY"]
+        return st.secrets["GEMINI_API_KEY"]
     except Exception:
-        return os.getenv("ANTHROPIC_API_KEY")
+        return os.getenv("GEMINI_API_KEY")
 
 
 @st.cache_resource(show_spinner=False)
-def get_client(api_key: str) -> anthropic.Anthropic:
-    return anthropic.Anthropic(api_key=api_key)
+def get_client(api_key: str) -> genai.Client:
+    return genai.Client(api_key=api_key)
 
 
-def stream_reply(client: anthropic.Anthropic, messages: list[dict]):
+def stream_reply(client: genai.Client, messages: list[dict]):
     history = messages[-MAX_HISTORY_MESSAGES:]
     while history and history[0]["role"] != "user":
         history = history[1:]
-    with client.messages.stream(
+
+    gemini_contents = [
+        types.Content(
+            role="model" if m["role"] == "assistant" else "user",
+            parts=[types.Part.from_text(text=m["content"])],
+        )
+        for m in history
+    ]
+
+    response = client.models.generate_content_stream(
         model=MODEL,
-        max_tokens=MAX_TOKENS,
-        system=build_system_prompt(),
-        messages=history,
-    ) as stream:
-        for text in stream.text_stream:
-            yield text
+        contents=gemini_contents,
+        config=types.GenerateContentConfig(
+            system_instruction=build_system_prompt(),
+            max_output_tokens=MAX_TOKENS,
+        ),
+    )
+    for chunk in response:
+        if chunk.text:
+            yield chunk.text
 
 
 # ----------------------------------------------------------------------------
@@ -273,213 +286,213 @@ def render_auth() -> None:
                     st.error("Incorrect email or password.")
 
         with tab_up:
-            with st.form("signup_form"):
-                full_name = st.text_input("Full name", key="signup_name")
-                email = st.text_input("Email", key="signup_email")
-                password = st.text_input(
-                    "Password (min. 8 characters)", type="password", key="signup_pw"
-                )
-                confirm = st.text_input("Confirm password", type="password", key="signup_pw2")
-                submitted = st.form_submit_button("Create account", use_container_width=True)
-            if submitted:
-                if password != confirm:
-                    st.error("Passwords do not match.")
-                else:
-                    ok, message = db.create_user(full_name, email, password)
-                    if ok:
-                        st.session_state["user"] = db.authenticate(email, password)
-                        st.rerun()
-                    st.error(message)
-    render_footer()
+with st.form("signup_form"):
+full_name = st.text_input("Full name", key="signup_name")
+email = st.text_input("Email", key="signup_email")
+password = st.text_input(
+"Password (min. 8 characters)", type="password", key="signup_pw"
+)
+confirm = st.text_input("Confirm password", type="password", key="signup_pw2")
+submitted = st.form_submit_button("Create account", use_container_width=True)
+if submitted:
+if password != confirm:
+st.error("Passwords do not match.")
+else:
+ok, message = db.create_user(full_name, email, password)
+if ok:
+st.session_state["user"] = db.authenticate(email, password)
+st.rerun()
+st.error(message)
+render_footer()
+
+----------------------------------------------------------------------------
 
 
-# ----------------------------------------------------------------------------
-# Pages
-# ----------------------------------------------------------------------------
+Pages
+
+
+----------------------------------------------------------------------------
+
 def render_sidebar() -> str:
-    c = council_data()["council"]
-    user = st.session_state["user"]
-    with st.sidebar:
-        st.markdown(
-            f'<div class="side-brand">🎓 {esc(c["name"])}<br>'
-            f'<small>{esc(c["campus"])}</small></div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            f'<div class="side-user">Signed in as<br><b>{esc(user["full_name"])}</b></div>',
-            unsafe_allow_html=True,
-        )
-        page = st.radio("Navigate", PAGES, key="nav", label_visibility="collapsed")
-        st.divider()
-        if page == PAGE_CHAT and st.button("🗑️ Clear chat", use_container_width=True):
-            st.session_state["messages"] = []
-            st.rerun()
-        if st.button("Sign out", use_container_width=True):
-            for key in ("user", "messages", "pending_prompt"):
-                st.session_state.pop(key, None)
-            st.rerun()
-    return page
-
-
+c = council_data()["council"]
+user = st.session_state["user"]
+with st.sidebar:
+st.markdown(
+f'🎓 {esc(c["name"])}
+'
+f'{esc(c["campus"])}',
+unsafe_allow_html=True,
+)
+st.markdown(
+f'Signed in as
+{esc(user["full_name"])}',
+unsafe_allow_html=True,
+)
+page = st.radio("Navigate", PAGES, key="nav", label_visibility="collapsed")
+st.divider()
+if page == PAGE_CHAT and st.button("🗑️ Clear chat", use_container_width=True):
+st.session_state["messages"] = []
+st.rerun()
+if st.button("Sign out", use_container_width=True):
+for key in ("user", "messages", "pending_prompt"):
+st.session_state.pop(key, None)
+st.rerun()
+return page
 def page_chat() -> None:
-    c = council_data()["council"]
-    render_hero(
-        "Council Assistant",
-        "Ask about admissions, exam guidance, members, contacts and events",
-        f"{c['campus']} · Cabinet {c['cabinet']}",
-    )
-
-    api_key = get_api_key()
-    if not api_key:
-        st.error(
-            "The API key is missing. Add `ANTHROPIC_API_KEY` to your Streamlit secrets "
-            "(see README.md) and reload the app."
-        )
-        return
-    client = get_client(api_key)
-
-    messages = st.session_state.setdefault("messages", [])
-
-    typed = st.chat_input("Ask in English, Urdu or Roman Urdu...")
-    prompt = typed or st.session_state.pop("pending_prompt", None)
-    if prompt:
-        messages.append({"role": "user", "content": prompt})
-
-    if not messages:
-        with st.chat_message("assistant", avatar="🎓"):
-            st.write(
-                "Assalam-o-Alaikum! I'm the Saraiki Student Council assistant. "
-                "Ask me about admissions, exam preparation, council members, "
-                "contact numbers or upcoming events. / Aap Urdu ya Roman Urdu mein "
-                "bhi sawal pooch sakte hain."
-            )
-        cols = st.columns(2)
-        for i, question in enumerate(QUICK_QUESTIONS):
-            if cols[i % 2].button(question, use_container_width=True, key=f"quick_{i}"):
-                st.session_state["pending_prompt"] = question
-                st.rerun()
-
-    for msg in messages:
-        with st.chat_message(msg["role"], avatar="🎓" if msg["role"] == "assistant" else "🧑"):
-            st.markdown(msg["content"])
-
-    if prompt:
-        user_count = sum(1 for m in messages if m["role"] == "user")
-        with st.chat_message("assistant", avatar="🎓"):
-            if user_count > MAX_USER_MESSAGES_PER_SESSION:
-                reply = (
-                    "You have reached the message limit for this session. "
-                    "Please sign out and sign in again, or contact the council directly."
-                )
-                st.warning(reply)
-            else:
-                try:
-                    reply = st.write_stream(stream_reply(client, messages))
-                except anthropic.AuthenticationError:
-                    reply = "Authentication failed. Please check the API key."
-                    st.error(reply)
-                except anthropic.RateLimitError:
-                    reply = "The service is busy right now. Please try again in a moment."
-                    st.warning(reply)
-                except anthropic.APIError:
-                    reply = "Something went wrong while contacting the AI service. Please try again."
-                    st.error(reply)
-        messages.append({"role": "assistant", "content": reply})
-
-
+c = council_data()["council"]
+render_hero(
+"Council Assistant",
+"Ask about admissions, exam guidance, members, contacts and events",
+f"{c['campus']} · Cabinet {c['cabinet']}",
+)
+api_key = get_api_key()
+if not api_key:
+st.error(
+"The API key is missing. Add GEMINI_API_KEY to your Streamlit secrets "
+"and reload the app."
+)
+return
+client = get_client(api_key)
+messages = st.session_state.setdefault("messages", [])
+typed = st.chat_input("Ask in English, Urdu or Roman Urdu...")
+prompt = typed or st.session_state.pop("pending_prompt", None)
+if prompt:
+messages.append({"role": "user", "content": prompt})
+if not messages:
+with st.chat_message("assistant", avatar="🎓"):
+st.write(
+"Assalam-o-Alaikum! I'm the Saraiki Student Council assistant. "
+"Ask me about admissions, exam preparation, council members, "
+"contact numbers or upcoming events. / Aap Urdu ya Roman Urdu mein "
+"bhi sawal pooch sakte hain."
+)
+cols = st.columns(2)
+for i, question in enumerate(QUICK_QUESTIONS):
+if cols[i % 2].button(question, use_container_width=True, key=f"quick_{i}"):
+st.session_state["pending_prompt"] = question
+st.rerun()
+for msg in messages:
+with st.chat_message(msg["role"], avatar="🎓" if msg["role"] == "assistant" else "🧑"):
+st.markdown(msg["content"])
+if prompt:
+user_count = sum(1 for m in messages if m["role"] == "user")
+with st.chat_message("assistant", avatar="🎓"):
+if user_count > MAX_USER_MESSAGES_PER_SESSION:
+reply = (
+"You have reached the message limit for this session. "
+"Please sign out and sign in again, or contact the council directly."
+)
+st.warning(reply)
+else:
+try:
+reply = st.write_stream(stream_reply(client, messages))
+except errors.APIError as exc:
+if exc.code in (400, 403):
+reply = "Authentication failed. Please check the Gemini API key."
+st.error(reply)
+elif exc.code == 429:
+reply = "The service is busy right now. Please try again in a moment."
+st.warning(reply)
+else:
+reply = "Something went wrong while contacting the AI service. Please try again."
+st.error(reply)
+except Exception:
+reply = "Something went wrong while contacting the AI service. Please try again."
+st.error(reply)
+messages.append({"role": "assistant", "content": reply})
 def page_team() -> None:
-    data = council_data()
-    c, members = data["council"], data["members"]
-    render_hero("Our Team", f"Cabinet {c['cabinet']} · {c['campus']}")
-
-    query = st.text_input("Search by name or role", placeholder="e.g. Chairman, Maaz, Media")
-    if query.strip():
-        q = query.strip().lower()
-        found = [m for m in members if q in m["name"].lower() or q in m["role"].lower()]
-        if not found:
-            st.markdown('<div class="empty-state">No member found.</div>', unsafe_allow_html=True)
-        for i in range(0, len(found), 3):
-            for col, m in zip(st.columns(3), found[i : i + 3]):
-                col.markdown(member_card(m), unsafe_allow_html=True)
-    else:
-        _, centre, _ = st.columns([1, 1, 1])
-        centre.markdown(member_card(members[0], featured=True), unsafe_allow_html=True)
-        rest = members[1:]
-        for i in range(0, len(rest), 3):
-            for col, m in zip(st.columns(3), rest[i : i + 3]):
-                col.markdown(member_card(m), unsafe_allow_html=True)
-    render_footer()
-
-
+data = council_data()
+c, members = data["council"], data["members"]
+render_hero("Our Team", f"Cabinet {c['cabinet']} · {c['campus']}")
+query = st.text_input("Search by name or role", placeholder="e.g. Chairman, Maaz, Media")
+if query.strip():
+q = query.strip().lower()
+found = [m for m in members if q in m["name"].lower() or q in m["role"].lower()]
+if not found:
+st.markdown('No member found.', unsafe_allow_html=True)
+for i in range(0, len(found), 3):
+for col, m in zip(st.columns(3), found[i : i + 3]):
+col.markdown(member_card(m), unsafe_allow_html=True)
+else:
+_, centre, _ = st.columns([1, 2, 1])
+centre.markdown(member_card(members[0], featured=True), unsafe_allow_html=True)
+rest = members[1:]
+for i in range(0, len(rest), 3):
+for col, m in zip(st.columns(3), rest[i : i + 3]):
+col.markdown(member_card(m), unsafe_allow_html=True)
+render_footer()
 def event_card(event: dict) -> str:
-    meta = f"📅 {event['_date'].strftime('%A, %d %B %Y')}"
-    if event.get("time"):
-        meta += f" · 🕒 {esc(event['time'])}"
-    if event.get("venue"):
-        meta += f" · 📍 {esc(event['venue'])}"
-    desc = f'<div class="event-desc">{esc(event["description"])}</div>' if event.get("description") else ""
-    contact = (
-        f'<div class="event-meta">Contact: {esc(event["contact_role"])}</div>'
-        if event.get("contact_role")
-        else ""
-    )
-    return (
-        f'<div class="event-card"><div class="event-title">{esc(event.get("title", "Event"))}</div>'
-        f'<div class="event-meta">{meta}</div>{desc}{contact}</div>'
-    )
-
-
+meta = f"📅 {event['_date'].strftime('%A, %d %B %Y')}"
+if event.get("time"):
+meta += f" · 🕒 {esc(event['time'])}"
+if event.get("venue"):
+meta += f" · 📍 {esc(event['venue'])}"
+desc = f'{esc(event["description"])}' if event.get("description") else ""
+contact = (
+f'Contact: {esc(event["contact_role"])}'
+if event.get("contact_role")
+else ""
+)
+return (
+f'{esc(event.get("title", "Event"))}'
+f'{meta}{desc}{contact}'
+)
 def page_events() -> None:
-    render_hero("Upcoming Events", "Stay updated with council programs and activities")
-    upcoming, past = get_events()
-    if upcoming:
-        for event in upcoming:
-            st.markdown(event_card(event), unsafe_allow_html=True)
-    else:
-        st.markdown(
-            '<div class="empty-state">No upcoming events have been announced yet.<br>'
-            "Please check back soon!</div>",
-            unsafe_allow_html=True,
-        )
-    if past:
-        with st.expander(f"Past events ({len(past)})"):
-            for event in past:
-                st.markdown(event_card(event), unsafe_allow_html=True)
-    render_footer()
-
-
+render_hero("Upcoming Events", "Stay updated with council programs and activities")
+upcoming, past = get_events()
+if upcoming:
+for event in upcoming:
+st.markdown(event_card(event), unsafe_allow_html=True)
+else:
+st.markdown(
+'No upcoming events have been announced yet.
+'
+"Please check back soon!",
+unsafe_allow_html=True,
+)
+if past:
+with st.expander(f"Past events ({len(past)})"):
+for event in past:
+st.markdown(event_card(event), unsafe_allow_html=True)
+render_footer()
 def page_about() -> None:
-    c = council_data()["council"]
-    render_hero(f"About {c['name']}", c["campus"], f"Cabinet {c['cabinet']}")
-    st.markdown(
-        f'<div class="info-card"><b>Founder:</b> {esc(c["founder"])}<br>'
-        f'<b>Founded:</b> {esc(c["founded"])}<br>'
-        f'<b>Campus:</b> {esc(c["campus"])}</div>',
-        unsafe_allow_html=True,
-    )
-    purpose = "".join(f"<li>{esc(p)}</li>" for p in c["purpose"])
-    st.markdown(
-        f'<div class="info-card"><b>Our purpose</b><ul>{purpose}</ul></div>',
-        unsafe_allow_html=True,
-    )
-    render_footer()
+c = council_data()["council"]
+render_hero(f"About {c['name']}", c["campus"], f"Cabinet {c['cabinet']}")
+st.markdown(
+f'Founder: {esc(c["founder"])}
+'
+f'Founded: {esc(c["founded"])}
+'
+f'Campus: {esc(c["campus"])}',
+unsafe_allow_html=True,
+)
+purpose = "".join(f"{esc(p)}" for p in c["purpose"])
+st.markdown(
+f'Our purpose{purpose}',
+unsafe_allow_html=True,
+)
+render_footer()
+
+----------------------------------------------------------------------------
 
 
-# ----------------------------------------------------------------------------
-# App entry point
-# ----------------------------------------------------------------------------
+App entry point
+
+
+----------------------------------------------------------------------------
+
 st.set_page_config(page_title="Saraiki Student Council", page_icon="🎓", layout="centered")
 css_path = BASE_DIR / "styles.css"
 if css_path.exists():
-    st.markdown(f"<style>{css_path.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
-
+st.markdown(f"{css_path.read_text(encoding='utf-8')}", unsafe_allow_html=True)
 db.init_db()
-
 if not st.session_state.get("user"):
-    render_auth()
-    st.stop()
-
+render_auth()
+st.stop()
 current_page = render_sidebar()
-{PAGE_CHAT: page_chat, PAGE_TEAM: page_team, PAGE_EVENTS: page_events, PAGE_ABOUT: page_about}[
-    current_page
-]()
+{PAGE_CHAT: page_chat, PAGE_TEAM: page_team, PAGE_EVENTS: page_events, PAGE_ABOUT: page_about}
+current_page
+
+<FollowUp>
+Code copy karke GitHub par save karne ke baad bataiye ga ke **app deploy ho gayi hai** ya koi aur error aa raha hai!
+</FollowUp>
