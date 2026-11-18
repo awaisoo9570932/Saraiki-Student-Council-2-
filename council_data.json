@@ -1,0 +1,37 @@
+{
+  "council": {
+    "name": "Saraiki Student Council",
+    "campus": "Superior University Gold Campus",
+    "cabinet": "2027-2028",
+    "founder": "Saraiki Student Council Founders",
+    "founded": "2022",
+    "purpose": [
+      "Guide new and existing students with admissions, scholarships, and academic queries.",
+      "Promote Saraiki culture, unity, and student welfare on campus.",
+      "Organize educational seminars, cultural events, and exam preparation sessions."
+    ]
+  },
+  "members": [
+    {
+      "id": "chairman",
+      "name": "Chairman Saraiki Council",
+      "role": "Chairman",
+      "phone": "",
+      "help_with": "Admissions, fee issues, major student concerns, and overall council guidance"
+    },
+    {
+      "id": "gen_sec",
+      "name": "General Secretary",
+      "role": "General Secretary",
+      "phone": "",
+      "help_with": "Admissions, departmental coordination, event registrations, and general help"
+    },
+    {
+      "id": "academic_head",
+      "name": "Academic Coordinator",
+      "role": "Head of Academics",
+      "phone": "",
+      "help_with": "Mid-term and final exam preparation, notes, past papers, and study guidance"
+    }
+  ]
+}
